@@ -1,451 +1,346 @@
 #include <Bluepad32.h>
+#include <esp_system.h>  // esp_reset_reason()
 
-// Definicação  do Dpad
-#define ESQUERDA 8
-#define DIREITA 4
+// =====================================================================
+//  Robô Sumô Controlado — firmware da ESP32 (Bluepad32)
+//
+//  Placa alvo: ESP32 clássico (ex.: "ESP32 Dev Module" em esp32_bluepad32).
+//  O ESP32-S3 não tem Bluetooth Clássico (controles de PS3/PS4/PS5/Switch
+//  não pareiam) e não possui os GPIOs 27 e 33 livres.
+// =====================================================================
+
+// ----------------------------- AJUSTES -------------------------------
+
+// Exibe no Serial Monitor os dados do controle a cada leitura.
+// Deixe em 0 durante as lutas: imprimir tudo isso deixa o robô mais lento.
+#define DEBUG_CONTROLE 1  // TEMPORÁRIO: diagnóstico do relé 3. Voltar para 0 antes das lutas.
+
+// Zona morta do analógico (escala de -512 a 512). Evita que a folga do
+// analógico em repouso movimente o robô.
+#define ZONA_MORTA 100
+
+// Ao inverter o sentido de um motor (frente -> trás), ele fica desligado
+// por este tempo antes de girar ao contrário. Poupa os relés, mas atrasa a
+// resposta. Em luta, resposta vale mais: 0 = inversão imediata.
+// Se os contatos dos relés começarem a falhar, use algo entre 20 e 40.
+#define TEMPO_REVERSAO_MS 0
+
+// L1 faz o robô girar no próprio eixo por este tempo (meia-volta).
+// Ajuste testando no seu robô até ele virar 180 graus.
+#define TEMPO_MEIA_VOLTA_MS 400
+
+// Para os motores se o controle ficar este tempo sem enviar dados.
+// ATENÇÃO: controles de PS4/PS5 enviam dados o tempo todo, mas alguns
+// (ex.: Xbox) só enviam quando algo muda. Com eles, segurar o analógico
+// parado faria o robô parar sozinho. Por isso vem desativado (0).
+// Com controle de PS4/PS5, use por exemplo 500.
+#define TIMEOUT_SEM_DADOS_MS 0
+
+// ------------------------------ PINOS --------------------------------
+// ATENÇÃO: o GPIO 12 é um pino de "strapping" do ESP32. Se ele estiver em nível
+// alto no momento em que a placa liga, ela pode não iniciar ou ficar reiniciando.
+// Se isso acontecer com o módulo de relés conectado, mude o rele4 para o GPIO 26
+// (e mova o fio do IN1 para o pino 26).
+#define rele4 12  // IN1 do relé (módulo 1) — motor 2
+#define rele3 27  // IN2 do relé (módulo 1) — motor 2
+#define rele2 33  // IN1 do relé (módulo 2) — motor 1
+#define rele1 15  // IN2 do relé (módulo 2) — motor 1
+#define rele5 14  // relé auxiliar
+#define PINO_13 13
+
+// Os relés são acionados em nível BAIXO.
+#define RELE_LIGADO LOW
+#define RELE_DESLIGADO HIGH
+
+// ------------------------------ D-PAD --------------------------------
 #define FRENTE 1
 #define TRAS 2
-#define FRENTE_ESQUERDA 9
+#define DIREITA 4
+#define ESQUERDA 8
 #define FRENTE_DIREITA 5
-#define TRAS_ESQUERDA 10
 #define TRAS_DIREITA 6
+#define FRENTE_ESQUERDA 9
+#define TRAS_ESQUERDA 10
 
-// Definição do relé
-#define rele4 12       //o pino IN1 do Rele (modulo 1) será ligado ao pino 12 da Esp32
-#define rele3 27       //o pino IN2 do Rele (modulo 1) será ligado ao pino 27 da Esp32
-#define rele2 33      //o pino IN1 do Rele (modulo 2) será ligado ao pino 33 da Esp32
-#define rele1 15      //o pino IN2 do Rele (modulo 2)  será ligado ao pino 15 da Esp32
-#define rele5 14
+// ============================ MOTORES ================================
+// Cada motor tem 3 estados: +1 (frente), 0 (parado) e -1 (trás).
 
-bool estadoRele = false;
+struct Motor {
+    uint8_t pinoFrente;     // relé que, ligado, faz o motor ir para frente
+    uint8_t pinoTras;       // relé que, ligado, faz o motor ir para trás
+    int8_t atual;           // sentido aplicado agora nos relés
+    int8_t desejado;        // sentido pedido pelo controle
+    unsigned long paradoEm; // instante em que o motor foi desligado
+};
 
-ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+// Mesma lógica dos relés da versão anterior:
+//   motor 1: rele2 ligado = frente, rele1 ligado = trás
+//   motor 2: rele4 ligado = frente, rele3 ligado = trás
+Motor motor1 = {rele2, rele1, 0, 0, 0};
+Motor motor2 = {rele4, rele3, 0, 0, 0};
 
-// This callback gets called any time a new gamepad is connected.
-// Up to 4 gamepads can be connected at the same time.
-void onConnectedController(ControllerPtr ctl) {
-    bool foundEmptySlot = false;
-    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
-        if (myControllers[i] == nullptr) {
-            Serial.printf("CALLBACK: Controller is connected, index=%d\n", i);
-            // Additionally, you can get certain gamepad properties like:
-            // Model, VID, PID, BTAddr, flags, etc.
-            ControllerProperties properties = ctl->getProperties();
-            Serial.printf("Controller model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id,
-                           properties.product_id);
-            myControllers[i] = ctl;
-            foundEmptySlot = true;
-            break;
+void escreverMotor(Motor& m, int8_t sentido) {
+    digitalWrite(m.pinoFrente, sentido > 0 ? RELE_LIGADO : RELE_DESLIGADO);
+    digitalWrite(m.pinoTras, sentido < 0 ? RELE_LIGADO : RELE_DESLIGADO);
+    if (sentido == 0 && m.atual != 0) {
+        m.paradoEm = millis();
+    }
+    m.atual = sentido;
+}
+
+// Aplica o sentido desejado respeitando o tempo de reversão.
+// É chamada a cada volta do loop, então não trava o programa.
+void atualizarMotor(Motor& m) {
+    if (m.desejado == m.atual) {
+        return;
+    }
+    if (m.desejado == 0) {
+        escreverMotor(m, 0);
+        return;
+    }
+    if (m.atual != 0) {
+        // Inversão direta: desliga primeiro e espera o tempo de reversão.
+        escreverMotor(m, 0);
+        if (TEMPO_REVERSAO_MS > 0) {
+            return;
         }
     }
-    if (!foundEmptySlot) {
-        Serial.println("CALLBACK: Controller connected, but could not found empty slot");
+    if (millis() - m.paradoEm >= TEMPO_REVERSAO_MS) {
+        escreverMotor(m, m.desejado);
     }
 }
 
-void onDisconnectedController(ControllerPtr ctl) {
-    bool foundController = false;
+void mover(int8_t sentidoMotor1, int8_t sentidoMotor2) {
+    motor1.desejado = sentidoMotor1;
+    motor2.desejado = sentidoMotor2;
+    atualizarMotor(motor1);
+    atualizarMotor(motor2);
+}
 
-    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
-        if (myControllers[i] == ctl) {
-            Serial.printf("CALLBACK: Controller disconnected from index=%d\n", i);
-            myControllers[i] = nullptr;
-            foundController = true;
-            break;
-        }
-    }
+// Parada imediata (sem esperar nada).
+void stop() {
+    motor1.desejado = 0;
+    motor2.desejado = 0;
+    escreverMotor(motor1, 0);
+    escreverMotor(motor2, 0);
+}
 
-    if (!foundController) {
-        Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
+void movimento_frente()          { mover(+1, +1); }
+void movimento_tras()            { mover(-1, -1); }
+void movimento_esquerda()        { mover(-1, +1); }
+void movimento_direita()         { mover(+1, -1); }
+void movimento_frente_esquerda() { mover(+1,  0); }
+void movimento_frente_direita()  { mover( 0, +1); }
+void movimento_tras_esquerda()   { mover( 0, -1); }
+void movimento_tras_direita()    { mover(-1,  0); }
+
+// ======================= COMANDOS DO CONTROLE ========================
+
+void controleRoboSetas(int xy) {
+    switch (xy) {
+        case FRENTE:          movimento_frente();          break;
+        case TRAS:            movimento_tras();            break;
+        case ESQUERDA:        movimento_esquerda();        break;
+        case DIREITA:         movimento_direita();         break;
+        case FRENTE_ESQUERDA: movimento_frente_esquerda(); break;
+        case FRENTE_DIREITA:  movimento_frente_direita();  break;
+        case TRAS_ESQUERDA:   movimento_tras_esquerda();   break;
+        case TRAS_DIREITA:    movimento_tras_direita();    break;
+        default:              stop();                      break;  // combinação inválida
     }
 }
 
-// ----- JOYSTICK ------
-void dumpGamepad(ControllerPtr ctl) {
-    Serial.printf(
-        "idx=%d, dpad: 0x%02x, buttons: 0x%04x, axis L: %4d, %4d, axis R: %4d, %4d, brake: %4d, throttle: %4d, "
-        "misc: 0x%02x, gyro x:%6d y:%6d z:%6d, accel x:%6d y:%6d z:%6d\n",
-        ctl->index(),        // Controller Index
-        ctl->dpad(),         // D-pad
-        ctl->buttons(),      // bitmask of pressed buttons
-        ctl->axisX(),        // (-511 - 512) left X Axis
-        ctl->axisY(),        // (-511 - 512) left Y axis
-        ctl->axisRX(),       // (-511 - 512) right X axis
-        ctl->axisRY(),       // (-511 - 512) right Y axis
-        ctl->brake(),        // (0 - 1023): brake button
-        ctl->throttle(),     // (0 - 1023): throttle (AKA gas) button
-        ctl->miscButtons(),  // bitmask of pressed "misc" buttons
-        ctl->gyroX(),        // Gyro X
-        ctl->gyroY(),        // Gyro Y
-        ctl->gyroZ(),        // Gyro Z
-        ctl->accelX(),       // Accelerometer X
-        ctl->accelY(),       // Accelerometer Y
-        ctl->accelZ()        // Accelerometer Z
-    );
-    int eixoX = ctl->axisRX();
-    int eixoY = ctl->axisY();
+// Analógico como na versão original: frente/trás têm prioridade e sempre usam
+// os DOIS motores (força total no empurrão). O giro só acontece com o eixo Y
+// solto. Sem diagonais aqui: elas desligam um motor e, com o dedo levemente
+// torto, o robô perdia metade da força. Diagonais ficam no D-pad.
+// Sentido do eixo X igual ao original: X negativo = direita.
+void controleRoboJoystick(int eixoX, int eixoY) {
+    if (eixoY <= -ZONA_MORTA) {
+        movimento_frente();
+    } else if (eixoY >= ZONA_MORTA) {
+        movimento_tras();
+    } else if (eixoX <= -ZONA_MORTA) {
+        movimento_direita();
+    } else if (eixoX >= ZONA_MORTA) {
+        movimento_esquerda();
+    } else {
+        stop();  // analógico solto
+    }
+}
+
+// O D-pad tem prioridade; o analógico só é usado quando nenhuma seta está
+// pressionada. Assim os dois não "brigam" pelo comando dos motores.
+void controlarMovimento(ControllerPtr ctl) {
     int xy = ctl->dpad();
-    controleRoboSetas(xy);
-    controleRoboJoystick(eixoX, eixoY);
-}
-
-void dumpMouse(ControllerPtr ctl) {
-    Serial.printf("idx=%d, buttons: 0x%04x, scrollWheel=0x%04x, delta X: %4d, delta Y: %4d\n",
-                   ctl->index(),        // Controller Index
-                   ctl->buttons(),      // bitmask of pressed buttons
-                   ctl->scrollWheel(),  // Scroll Wheel
-                   ctl->deltaX(),       // (-511 - 512) left X Axis
-                   ctl->deltaY()        // (-511 - 512) left Y axis
-    );
-}
-
-void dumpKeyboard(ControllerPtr ctl) {
-    static const char* key_names[] = {
-        // clang-format off
-        // To avoid having too much noise in this file, only a few keys are mapped to strings.
-        // Starts with "A", which is offset 4.
-        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V",
-        "W", "X", "Y", "Z", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
-        // Special keys
-        "Enter", "Escape", "Backspace", "Tab", "Spacebar", "Underscore", "Equal", "OpenBracket", "CloseBracket",
-        "Backslash", "Tilde", "SemiColon", "Quote", "GraveAccent", "Comma", "Dot", "Slash", "CapsLock",
-        // Function keys
-        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-        // Cursors and others
-        "PrintScreen", "ScrollLock", "Pause", "Insert", "Home", "PageUp", "Delete", "End", "PageDown",
-        "RightArrow", "LeftArrow", "DownArrow", "UpArrow",
-        // clang-format on
-    };
-    static const char* modifier_names[] = {
-        // clang-format off
-        // From 0xe0 to 0xe7
-        "Left Control", "Left Shift", "Left Alt", "Left Meta",
-        "Right Control", "Right Shift", "Right Alt", "Right Meta",
-        // clang-format on
-    };
-    Serial.printf("idx=%d, Pressed keys: ", ctl->index());
-    for (int key = Keyboard_A; key <= Keyboard_UpArrow; key++) {
-        if (ctl->isKeyPressed(static_cast<KeyboardKey>(key))) {
-            const char* keyName = key_names[key-4];
-            Serial.printf("%s,", keyName);
-       }
+    if (xy != 0) {
+        controleRoboSetas(xy);
+    } else {
+        controleRoboJoystick(ctl->axisRX(), ctl->axisY());
     }
-    for (int key = Keyboard_LeftControl; key <= Keyboard_RightMeta; key++) {
-        if (ctl->isKeyPressed(static_cast<KeyboardKey>(key))) {
-            const char* keyName = modifier_names[key-0xe0];
-            Serial.printf("%s,", keyName);
-        }
-    }
-    Console.printf("\n");
 }
 
-void dumpBalanceBoard(ControllerPtr ctl) {
-    Serial.printf("idx=%d,  TL=%u, TR=%u, BL=%u, BR=%u, temperature=%d\n",
-                   ctl->index(),        // Controller Index
-                   ctl->topLeft(),      // top-left scale
-                   ctl->topRight(),     // top-right scale
-                   ctl->bottomLeft(),   // bottom-left scale
-                   ctl->bottomRight(),  // bottom-right scale
-                   ctl->temperature()   // temperature: used to adjust the scale value's precision
-    );
+void dumpGamepad(ControllerPtr ctl) {
+#if DEBUG_CONTROLE
+    Serial.printf("dpad: 0x%02x, botões: 0x%04x, eixo L: %4d, %4d, eixo R: %4d, %4d, motores: %d %d\n",
+                  ctl->dpad(), ctl->buttons(), ctl->axisX(), ctl->axisY(), ctl->axisRX(), ctl->axisRY(),
+                  motor1.atual, motor2.atual);
+#endif
 }
 
-// ----- BOTÕES ------
+// Estado da meia-volta (L1).
+bool meiaVoltaAtiva = false;
+unsigned long meiaVoltaInicio = 0;
+
+ControllerPtr controle = nullptr;
+unsigned long ultimoDado = 0;
+
 void processGamepad(ControllerPtr ctl) {
-    // There are different ways to query whether a button is pressed.
-    // By query each button individually:
-    //  a(), b(), x(), y(), l1(), etc...
-    if (ctl->a()) {
-        static int colorIdx = 0;
-        // Some gamepads like DS4 and DualSense support changing the color LED.
-        // It is possible to change it by calling:
-        switch (colorIdx % 3) {
-            case 0:
-                // Red
-                ctl->setColorLED(255, 0, 0);
-                break;
-            case 1:
-                // Green
-                ctl->setColorLED(0, 255, 0);
-                break;
-            case 2:
-                // Blue
-                ctl->setColorLED(0, 0, 255);
-                break;
-        }
-        colorIdx++;
+    // R1 alterna o relé auxiliar só no instante em que é apertado (borda de subida).
+    static bool r1Anterior = false;
+    static bool estadoRele = false;
+    bool r1Agora = ctl->r1();
+    if (r1Agora && !r1Anterior) {
+        estadoRele = !estadoRele;
+        digitalWrite(rele5, estadoRele ? HIGH : LOW);
+    }
+    r1Anterior = r1Agora;
+
+    static bool l1Anterior = false;
+    bool l1Agora = ctl->l1();
+    bool l1Apertado = l1Agora && !l1Anterior;
+    l1Anterior = l1Agora;
+
+    // Prioridades: L2 (freio) > meia-volta em andamento > L1 > R2 > D-pad > analógico.
+    if (ctl->l2()) {
+        meiaVoltaAtiva = false;
+        stop();
+    } else if (meiaVoltaAtiva) {
+        // Deixa a meia-volta terminar; o loop() encerra no tempo certo.
+    } else if (l1Apertado) {
+        meiaVoltaAtiva = true;
+        meiaVoltaInicio = millis();
+        movimento_esquerda();  // gira no próprio eixo
+    } else if (ctl->r2()) {
+        movimento_frente();    // investida: frente total, ignora D-pad e analógico
+    } else {
+        controlarMovimento(ctl);
     }
 
-    if (ctl->b()) {
-        // Turn on the 4 LED. Each bit represents one LED.
-        static int led = 0;
-        led++;
-        // Some gamepads like the DS3, DualSense, Nintendo Wii, Nintendo Switch
-        // support changing the "Player LEDs": those 4 LEDs that usually indicate
-        // the "gamepad seat".
-        // It is possible to change them by calling:
-        ctl->setPlayerLEDs(led & 0x0f);
-    }
-
-    if (ctl->x()) {
-        // Some gamepads like DS3, DS4, DualSense, Switch, Xbox One S, Stadia support rumble.
-        // It is possible to set it by calling:
-        // Some controllers have two motors: "strong motor", "weak motor".
-        // It is possible to control them independently.
-        ctl->playDualRumble(0 /* delayedStartMs */, 250 /* durationMs */, 0x80 /* weakMagnitude */,
-                            0x40 /* strongMagnitude */);
-    }
-
-    if(ctl->l2()){
-      stop();
-    }
-
-    if(ctl->r1()){
-      if(estadoRele){
-        digitalWrite(rele5, 0);
-        estadoRele = false;
-      }else{
-        digitalWrite(rele5, 1);
-        estadoRele = true;
-      }
-    }
-    // Another way to query controller data is by getting the buttons() function.
-    // See how the different "dump*" functions dump the Controller info.
     dumpGamepad(ctl);
 }
 
-void processMouse(ControllerPtr ctl) {
-    // This is just an example.
-    if (ctl->scrollWheel() > 0) {
-        // Do Something
-    } else if (ctl->scrollWheel() < 0) {
-        // Do something else
-    }
-
-    // See "dumpMouse" for possible things to query.
-    dumpMouse(ctl);
-}
-
-void processKeyboard(ControllerPtr ctl) {
-    if (!ctl->isAnyKeyPressed())
-        return;
-
-    // This is just an example.
-    if (ctl->isKeyPressed(Keyboard_A)) {
-        // Do Something
-        Serial.println("Key 'A' pressed");
-    }
-
-    // Don't do "else" here.
-    // Multiple keys can be pressed at the same time.
-    if (ctl->isKeyPressed(Keyboard_LeftShift)) {
-        // Do something else
-        Serial.println("Key 'LEFT SHIFT' pressed");
-    }
-
-    // Don't do "else" here.
-    // Multiple keys can be pressed at the same time.
-    if (ctl->isKeyPressed(Keyboard_LeftArrow)) {
-        // Do something else
-        Serial.println("Key 'Left Arrow' pressed");
-    }
-
-    // See "dumpKeyboard" for possible things to query.
-    dumpKeyboard(ctl);
-}
-
-void processBalanceBoard(ControllerPtr ctl) {
-    // This is just an example.
-    if (ctl->topLeft() > 10000) {
-        // Do Something
-    }
-
-    // See "dumpBalanceBoard" for possible things to query.
-    dumpBalanceBoard(ctl);
-}
-
-void processControllers() {
-    for (auto myController : myControllers) {
-        if (myController && myController->isConnected() && myController->hasData()) {
-            if (myController->isGamepad()) {
-                processGamepad(myController);
-            } else if (myController->isMouse()) {
-                processMouse(myController);
-            } else if (myController->isKeyboard()) {
-                processKeyboard(myController);
-            } else if (myController->isBalanceBoard()) {
-                processBalanceBoard(myController);
-            } else {
-                Serial.println("Unsupported controller");
-            }
+// Chamada no loop(): encerra a meia-volta e retoma o comando atual do
+// controle (ex.: R2 segurado), sem esperar o próximo pacote do controle.
+void atualizarMeiaVolta() {
+    if (meiaVoltaAtiva && millis() - meiaVoltaInicio >= TEMPO_MEIA_VOLTA_MS) {
+        meiaVoltaAtiva = false;
+        if (controle && controle->isConnected()) {
+            processGamepad(controle);
+        } else {
+            stop();
         }
     }
 }
 
-void movimento_esquerda(){
-  digitalWrite(rele1, 0);                 //envia nível lógico baixo para o rele 1       //liga o motor 1
-  digitalWrite(rele2, 1);                 //envia nível lógico alto para o rele 2        //para tras
-  digitalWrite(rele3, 1);                 //envia nível lógico alto para o rele 3       **liga o motor 2
-  digitalWrite(rele4, 0);                 //envia nível lógico baixo para o rele 4      **para frente
-  delay(150);
-  stop();
+// ============================ CONEXÃO ================================
+// Só um controle pilota o robô. Um segundo controle que tente se conectar
+// é recusado, para que dois controles não disputem os motores.
+
+void onConnectedController(ControllerPtr ctl) {
+    if (controle != nullptr) {
+        Serial.println("Segundo controle recusado: o robô já tem um controle conectado.");
+        ctl->disconnect();
+        return;
+    }
+    controle = ctl;
+    ultimoDado = millis();
+    Serial.printf("Controle conectado: %s\n", ctl->getModelName().c_str());
+
+    // Avisa no próprio controle que a conexão deu certo (quando ele suporta).
+    ctl->setColorLED(0, 255, 0);
+    ctl->setPlayerLEDs(0x01);
+    ctl->playDualRumble(0, 200, 0x80, 0x40);
 }
 
-void movimento_direita(){
-  digitalWrite(rele1, 1);                 //envia nível lógico alto para o rele 1       //liga o motor 1
-  digitalWrite(rele2, 0);                 //envia nível lógico baixo para o rele 2      //para frente
-  digitalWrite(rele3, 0);                 //envia nível lógico baixo para o rele 3       **liga o motor 2
-  digitalWrite(rele4, 1);                 //envia nível lógico alto para o rele 4        **para tras
-  delay(150);
-  stop();
+void onDisconnectedController(ControllerPtr ctl) {
+    if (ctl != controle) {
+        return;  // era o segundo controle recusado
+    }
+    // Segurança: se o controle desconectar (bateria, distância), os motores param.
+    meiaVoltaAtiva = false;
+    stop();
+    controle = nullptr;
+    Serial.println("Controle desconectado: motores parados.");
 }
 
-void movimento_frente(){
-  digitalWrite(rele1, 1);                 //envia nível lógico alto para o rele 1       //liga o motor 1
-  digitalWrite(rele2, 0);                 //envia nível lógico baixo para o rele 2      //para frente
-  digitalWrite(rele3, 1);                 //envia nível lógico alto para o rele 3       **liga o motor 2
-  digitalWrite(rele4, 0);                 //envia nível lógico baixo para o rele 4      **para frente
+void processControllers() {
+    if (controle && controle->isConnected() && controle->hasData() && controle->isGamepad()) {
+        ultimoDado = millis();
+        processGamepad(controle);
+    }
 }
 
-void movimento_tras(){
-  digitalWrite(rele1, 0);                 //envia nível lógico baixo para o rele 1       //liga o motor 1
-  digitalWrite(rele2, 1);                 //envia nível lógico alto para o rele 2        //para tras
-  digitalWrite(rele3, 0);                 //envia nível lógico baixo para o rele 3       **liga o motor 2
-  digitalWrite(rele4, 1);                 //envia nível lógico alto para o rele 4        **para tras
+void verificarTimeout() {
+#if TIMEOUT_SEM_DADOS_MS > 0
+    bool motoresLigados = motor1.desejado != 0 || motor2.desejado != 0;
+    if (controle && motoresLigados && millis() - ultimoDado > TIMEOUT_SEM_DADOS_MS) {
+        meiaVoltaAtiva = false;
+        stop();
+        Serial.println("Sem dados do controle: motores parados.");
+    }
+#endif
 }
 
-void movimento_frente_esquerda(){
-  digitalWrite(rele1, 1);                 //envia nível lógico alto para o rele 1      //liga o motor 1
-  digitalWrite(rele2, 0);                 //envia nível lógico baixo para o rele 2     //para frente
-  digitalWrite(rele3, 1);                 //envia nível lógico alto para o rele 3      **desliga o motor 2
-  digitalWrite(rele4, 1);                 //envia nível lógico alto para o rele 4      **desliga o motor 2
-}
+// ============================ ARDUINO ================================
 
-void movimento_frente_direita(){
-  digitalWrite(rele1, 1);                 //envia nível lógico alto para o rele 1        //desliga o motor 1
-  digitalWrite(rele2, 1);                 //envia nível lógico alto para o rele 2        //desliga o motor 1
-  digitalWrite(rele3, 1);                 //envia nível lógico alto para o rele 3       **liga o motor 2
-  digitalWrite(rele4, 0);                 //envia nível lógico baixo para o rele 4      **para frente
-}
-
-void movimento_tras_esquerda(){
-  digitalWrite(rele1, 1);                 //envia nível lógico alto para o rele 1        //desliga o motor 1
-  digitalWrite(rele2, 1);                 //envia nível lógico alto para o rele 2        //desliga o motor 1
-  digitalWrite(rele3, 0);                 //envia nível lógico baixo para o rele 3       **liga o motor 2
-  digitalWrite(rele4, 1);                 //envia nível lógico alto para o rele 4        **para tras
-}
-
-void movimento_tras_direita(){
-  digitalWrite(rele1, 0);                 //envia nível lógico baixo para o rele 1       //liga o motor 1
-  digitalWrite(rele2, 1);                 //envia nível lógico alto para o rele 2        //para tras
-  digitalWrite(rele3, 1);                 //envia nível lógico alto para o rele 3      **desliga o motor 2
-  digitalWrite(rele4, 1);                 //envia nível lógico alto para o rele 4      **desliga o motor 2
-}
-
-void stop(){
-  digitalWrite(rele1, 1);                 //envia nível lógico alto para o rele 1      //desliga o motor 1
-  digitalWrite(rele2, 1);                 //envia nível lógico alto para o rele 2      //desliga o motor 1
-  digitalWrite(rele3, 1);                 //envia nível lógico alto para o rele 3      **desliga o motor 2
-  digitalWrite(rele4, 1);                 //envia nível lógico alto para o rele 4      **desliga o motor 2
-}
-
-void controleRoboJoystick(int eixoX, int eixoY){
-  //MOVIMENTAÇÕES DO ROBÔ
-  if(eixoX >= -512 && eixoX <= -10) { // Direita
-    movimento_direita();
-  }
-  else if(eixoX <= 512 && eixoX >= 10) { // Esquerda
-    movimento_esquerda();
-  }
-  
-  if(eixoY >= -512 && eixoY <= -10) { // Frente
-    movimento_frente();
-  }
-  else if(eixoY <= 512 && eixoY >= 10) { // Trás
-    movimento_tras();
-  }
-}
-
-void controleRoboSetas(int xy){
-  // MOVIMENTAÇÕES DO ROBÔ
-  switch(xy) {
-    case ESQUERDA: // Esquerda
-      movimento_esquerda();
-      break;
-    case DIREITA: // Direita
-      movimento_direita();
-      break;
-    case FRENTE: // Frente
-      movimento_frente();
-      break;
-    case TRAS: // Trás
-      movimento_tras();
-      break;
-    case FRENTE_ESQUERDA: // Para frente e esquerda
-      movimento_frente_esquerda();
-      break;
-    case FRENTE_DIREITA: // Para frente e direita
-      movimento_frente_direita();
-      break;
-    case TRAS_ESQUERDA: // Para trás e esquerda
-      movimento_tras_esquerda();
-      break;
-    case TRAS_DIREITA: // Para trás e direita
-      movimento_tras_direita();
-      break;
-    default: // Comando inválido
-      break;
-  }
-}
-
-// Arduino setup function. Runs in CPU 1
 void setup() {
-    pinMode(rele5, OUTPUT);
+    // Relés começam desligados antes de qualquer outra coisa.
     pinMode(rele1, OUTPUT);
     pinMode(rele2, OUTPUT);
     pinMode(rele3, OUTPUT);
     pinMode(rele4, OUTPUT);
-    pinMode(13, OUTPUT);
-    digitalWrite(rele5, 0);
-    digitalWrite(13, HIGH);
+    pinMode(rele5, OUTPUT);
+    pinMode(PINO_13, OUTPUT);
     stop();
+    digitalWrite(rele5, LOW);
+    digitalWrite(PINO_13, HIGH);
+
     Serial.begin(115200);
+    // Motivo do último reinício. Se aparecer "BROWNOUT" ou se esta mensagem
+    // se repetir sem parar, a placa está reiniciando (problema de alimentação
+    // ou do GPIO 12), e não um erro de lógica do firmware.
+    const char* motivos[] = {"DESCONHECIDO", "LIGOU", "EXTERNO", "SOFTWARE", "PANIC (travou)",
+                             "WATCHDOG INT", "WATCHDOG TASK", "WATCHDOG", "DEEP SLEEP", "BROWNOUT", "SDIO"};
+    int motivo = (int)esp_reset_reason();
+    Serial.printf("\n=== INICIANDO === motivo do reinicio: %s\n",
+                  motivo < (int)(sizeof(motivos) / sizeof(motivos[0])) ? motivos[motivo] : "OUTRO");
     Serial.printf("Firmware: %s\n", BP32.firmwareVersion());
     const uint8_t* addr = BP32.localBdAddress();
     Serial.printf("BD Addr: %2X:%2X:%2X:%2X:%2X:%2X\n", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
 
-    // Setup the Bluepad32 callbacks
     BP32.setup(&onConnectedController, &onDisconnectedController);
 
-    // "forgetBluetoothKeys()" should be called when the user performs
-    // a "device factory reset", or similar.
-    // Calling "forgetBluetoothKeys" in setup() just as an example.
-    // Forgetting Bluetooth keys prevents "paired" gamepads to reconnect.
-    // But it might also fix some connection / re-connection issues.
-    //BP32.forgetBluetoothKeys();
+    // Se o controle tiver problemas para reconectar, descomente a linha abaixo,
+    // grave, pareie de novo e depois comente outra vez.
+    // BP32.forgetBluetoothKeys();
 
-    // Enables mouse / touchpad support for gamepads that support them.
-    // When enabled, controllers like DualSense and DualShock4 generate two connected devices:
-    // - First one: the gamepad
-    // - Second one, which is a "virtual device", is a mouse.
-    // By default, it is disabled.
+    // Sem isso, controles de PS4/PS5 criam um segundo dispositivo (touchpad como mouse).
     BP32.enableVirtualDevice(false);
 }
 
-// Arduino loop function. Runs in CPU 1.
 void loop() {
-    // This call fetches all the controllers' data.
-    // Call this function in your main loop.
-    bool dataUpdated = BP32.update();
-    if (dataUpdated){
+    if (BP32.update()) {
         processControllers();
     }
-    // The main loop must have some kind of "yield to lower priority task" event.
-    // Otherwise, the watchdog will get triggered.
-    // If your main loop doesn't have one, just add a simple `vTaskDelay(1)`.
-    // Detailed info here:
-    // https://stackoverflow.com/questions/66278271/task-watchdog-got-triggered-the-tasks-did-not-reset-the-watchdog-in-time
+    atualizarMeiaVolta();
+    verificarTimeout();
 
-    //     vTaskDelay(1);
-    delay(150);
+    // Conclui inversões de sentido que estavam aguardando o tempo de reversão.
+    atualizarMotor(motor1);
+    atualizarMotor(motor2);
+
+    // Cede 1 ms para alimentar o watchdog: o mínimo possível, para o robô
+    // reagir ao controle o mais rápido que der.
+    delay(1);
 }

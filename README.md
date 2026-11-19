@@ -1,152 +1,130 @@
-<h1>Robô Modalidade Sumô - Controle Remoto</h1>
-<img src="https://github.com/pedro4896/RoboSumoControlado/blob/main/robos.jpeg" height="400px" align="center">
+# Robô Sumô Controlado por Bluetooth
+
+Projeto de um robô da modalidade sumô controlado por um gamepad compatível com **Bluepad32**. A ESP32 recebe os comandos por Bluetooth e aciona os dois motores por meio de módulos de relé.
+
 <p>
-  Um robô sumô é um tipo de robô projetado para participar de competições inspiradas no esporte tradicional japonês de sumô. Essas competições envolvem dois robôs tentando empurrar um ao outro para fora de uma arena circular, chamada dohyo, de maneira semelhante aos lutadores de sumô humanos.
-</p>
-<p>
-  Existem diferentes categorias de robôs sumô, geralmente baseadas em seu peso e tamanho, como micro, mini e mega sumô. Os robôs são frequentemente equipados com sensores, motores e outras tecnologias que permitem a detecção do adversário e estratégias de movimentação para empurrá-lo para fora do dohyo. As competições de robô sumô combinam engenharia, programação e design, desafiando os participantes a criar máquinas autônomas que podem competir de forma eficaz.
-</p>
-<p>
-  Os robôs podem ser controlados remotamente ou ser totalmente autônomos, dependendo das regras da competição. Em competições de robôs sumô autônomos, os robôs dependem exclusivamente de sua programação e sensores para tomar decisões em tempo real durante a luta.
+  <img src="./robos.jpeg" alt="Robô sumô construído" width="600">
 </p>
 
-<h2>Conexão Bluetooth</h2>
+## Objetivo
+
+Um robô sumô tenta empurrar o adversário para fora do dohyo, a arena circular utilizada nas competições. Dependendo da categoria, as regras podem limitar peso, tamanho e tecnologias permitidas.
+
+Este projeto utiliza controle remoto via Bluetooth. Futuramente, o firmware poderá ser expandido para incluir sensores, programação autônoma e controle proporcional dos motores.
+
+## Componentes
+
+| Quantidade | Componente |
+| ---: | --- |
+| 1 | ESP32 compatível com Bluepad32 |
+| 1 | Módulo relé de 4 canais, 5 V |
+| 1 | Módulo relé auxiliar de 1 canal, 5 V |
+| 2 | Motores de vidro elétrico |
+| 1 | Bateria LiPo 11,1 V |
+| 1 | Case para bateria 18650 |
+| 3 | Conectores XT60 macho/fêmea |
+| 1 | Controle remoto compatível com Bluepad32 |
+| 1 | Barra roscada de 8 mm |
+| 2 | Rolamentos 628 2RS |
+| 2 | Barras de pinos fêmea |
+| 1 kg | Filamento para impressão 3D |
+
+## Arquivos do Projeto
+
+| Arquivo | Descrição |
+| --- | --- |
+| [Controller.ino](./Controller.ino) | Firmware principal da ESP32 |
+| [robos.jpeg](./robos.jpeg) | Foto do robô montado |
+| [Diagrama_conexao.jpg](./Diagrama_conexao.jpg) | Diagrama de ligação |
+| [Chassi Remoto.stl](./Chassi%20Remoto.stl) | Modelo do chassi |
+
+## Configuração da Arduino IDE
+
+1. Instale a [Arduino IDE](https://www.arduino.cc/en/software).
+2. Em **Arquivo > Preferências**, adicione esta URL ao campo **URLs adicionais para gerenciadores de placas**:
+
+   ```text
+   https://dl.espressif.com/dl/package_esp32_index.json
+   ```
+
+3. Instale o pacote **ESP32 by Espressif Systems** em **Ferramentas > Placa > Gerenciador de placas**.
+4. Adicione o pacote Bluepad32 ao campo de URLs adicionais:
+
+   ```text
+   https://raw.githubusercontent.com/ricardoquesada/esp32-arduino-lib-builder/master/bluepad32_files/package_esp32_bluepad32_index.json
+   ```
+
+5. Instale a placa **esp32_bluepad32** em **Ferramentas > Placa > Gerenciador de placas**.
+6. Selecione o modelo correspondente da sua ESP32 em **Ferramentas > Placa**.
+7. Abra `Controller.ino`, selecione a porta serial e faça o upload.
+
+> **Importante:** selecione uma placa da plataforma **ESP32 + Bluepad32 Arduino**. Não use a biblioteca **Bluepad32 for NINA-W10 boards**: ela é destinada a placas Arduino com módulo NINA e possui uma API diferente. Se essa biblioteca estiver instalada e a compilação acusar métodos ausentes em `BP32` ou `Controller`, remova-a pelo Gerenciador de Bibliotecas e selecione a plataforma correta no Gerenciador de Placas.
+
+## Conexão dos Relés
+
+| Função | Pino da ESP32 |
+| --- | ---: |
+| Motor 1 - entrada 1 | GPIO 15 |
+| Motor 1 - entrada 2 | GPIO 33 |
+| Motor 2 - entrada 1 | GPIO 27 |
+| Motor 2 - entrada 2 | GPIO 12 |
+| Relé auxiliar | GPIO 14 |
+
+> Os sinais ativos e a lógica de acionamento podem depender do módulo de relé utilizado. Confirme a polaridade e faça o primeiro teste com os motores desligados da alimentação principal.
+
+## Controles
+
+| Entrada | Ação |
+| --- | --- |
+| D-pad | Frente, trás, esquerda, direita e movimentos diagonais |
+| Analógicos (Y do esquerdo, X do direito) | Frente/trás com os dois motores; giro só com o Y solto |
+| Analógicos na posição neutra | Para os motores |
+| R2 (segurar) | Investida: frente total, ignora D-pad e analógicos |
+| L1 | Meia-volta: gira no próprio eixo por `TEMPO_MEIA_VOLTA_MS` |
+| L2 | Parada de emergência (cancela tudo, inclusive a meia-volta) |
+| R1 | Alterna o estado do relé auxiliar |
+
+Prioridade dos comandos: L2 > meia-volta > L1 > R2 > D-pad > analógicos. No analógico, frente/trás sempre têm prioridade e usam os dois motores, para que um desvio leve do dedo não desligue um motor no meio do empurrão. As diagonais ficam só no D-pad. Ao conectar, o controle vibra e acende o LED (nos modelos que suportam). Apenas um controle pilota o robô: um segundo controle é recusado.
+
+## Ajustes no Firmware
+
+No início de `Controller.ino`:
+
+| Ajuste | Padrão | Função |
+| --- | ---: | --- |
+| `ZONA_MORTA` | 100 | Folga do analógico ignorada (escala de -512 a 512) |
+| `TEMPO_MEIA_VOLTA_MS` | 400 | Duração do giro do L1. Ajuste até o robô virar 180° |
+| `TEMPO_REVERSAO_MS` | 0 | Pausa antes de inverter o sentido de um motor. 0 = resposta imediata (luta); 20–40 poupa os relés |
+| `TIMEOUT_SEM_DADOS_MS` | 0 (desligado) | Para os motores se o controle ficar sem enviar dados. Use 500 com controles de PS4/PS5; não use com controles que só enviam dados quando algo muda (ex.: Xbox) |
+| `DEBUG_CONTROLE` | 0 | Mostra os dados do controle no Serial Monitor |
+
+## Segurança do Firmware
+
+- A desconexão do controle para os motores imediatamente.
+- A posição neutra do joystick para os motores.
+- O botão L2 permite uma parada manual imediata.
+- Opcional: breve parada nas inversões de sentido para poupar os relés (`TEMPO_REVERSAO_MS`).
+- Opcional: parada automática quando o controle fica sem enviar dados (`TIMEOUT_SEM_DADOS_MS`).
+- Use carregadores apropriados e desconecte a alimentação antes de mexer nas ligações.
+
+## Diagrama de Ligação
+
 <p>
-  Para criar um robô controlado remotamente, utilizei a ESP32, um microcontrolador com suporte a Bluetooth. A conexão entre o controle remoto e a ESP32 foi estabelecida utilizando um host de Bluetooth chamado BluePad32, que gerencia eficientemente a comunicação Bluetooth entre os dispositivos.
-</p>
-<p>
-  O funcionamento do robô é baseado nessa conexão. Uma vez estabelecida a comunicação entre o controle remoto e a ESP32, os comandos enviados pelas teclas do controle são transmitidos para a ESP32. Esta, por sua vez, processa esses comandos e executa as operações correspondentes, como movimentar o robô para frente, para trás, virar para os lados ou frear. Dessa forma, o robô responde de maneira precisa e rápida às instruções do controle remoto, permitindo um controle eficaz durante suas operações.
+  <img src="./Diagrama_conexao.jpg" alt="Diagrama de ligação do projeto" width="600">
 </p>
 
-<h2>Integração</h2>
-<p>
-  Para programar a ESP32, vamos utilizar a plataforma Arduino IDE. Siga os passos abaixo para instalar o suporte para a ESP32:
-  <ol>
-    <li>
-      <strong>Baixar e instalar a Arduino IDE:</strong>
-      <ul>
-        <li>
-          Se você ainda não tem a Arduino IDE instalada, baixe-a do <a href="https://www.arduino.cc/en/software">site oficial do Arduino</a> e siga as instruções de instalação para o seu sistema operacional.
-        </li>
-      </ul>
-    </li>
-    <li>
-      <strong>Abrir a Arduino IDE:</strong>
-      <ul>
-        <li>Após a instalação, abra a Arduino IDE.</li>
-      </ul>
-    </li>
-    <li>
-      <strong>Adicionar suporte para a ESP32:</strong>
-      <ul>
-        <li>Vá para o menu "File" (Arquivo) e selecione "Preferences" (Preferências).</li>
-        <li>Na janela que abrir, procure pelo campo "Additional Boards Manager URLs" (URLs Adicionais do Gerenciador de Placas).</li>
-        <li>Adicione a seguinte URL: <strong>https://dl.espressif.com/dl/package_esp32_index.json</strong></li>
-        <li>Clique em "OK" para salvar as mudanças.</li>
-      </ul>
-    </li>
-    <li>
-      <strong>Instalar o pacote da ESP32:</strong>
-      <ul>
-        <li>Vá para o menu "Tools" (Ferramentas) e selecione "Board" (Placa) e depois "Boards Manager" (Gerenciador de Placas).</li>
-        <li>Na janela que abrir, digite "ESP32" na barra de busca.</li>
-        <li>Encontre o pacote "esp32" da Espressif Systems e clique em "Install" (Instalar).</li>
-      </ul>
-    </li>
-    <li>
-      <strong>Adicionar suporte para Bluepad32:</strong>
-      <ul>
-        <li>Vá para o menu "File" (Arquivo) e selecione "Preferences" (Preferências).</li>
-        <li>Na janela que abrir, procure pelo campo "Additional Boards Manager URLs" (URLs Adicionais do Gerenciador de Placas).</li>
-        <li>Adicione a seguinte URL: <strong>https://raw.githubusercontent.com/ricardoquesada/esp32-arduino-lib-builder/master/bluepad32_files/package_esp32_bluepad32_index.json</strong></li>
-        <li>Clique em "OK" para salvar as mudanças.</li>
-      </ul>
-    </li>
-    <li>
-      <strong>Instalar o pacote da ESP32:</strong>
-      <ul>
-        <li>Vá para o menu "Tools" (Ferramentas) e selecione "Board" (Placa) e depois "Boards Manager" (Gerenciador de Placas).</li>
-        <li>Na janela que abrir, digite "esp32_bluepad32" na barra de busca.</li>
-        <li>Encontre o pacote "esp32_bluepad32" da Ricardo Quesada e clique em "Install" (Instalar).</li>
-      </ul>
-    </li>
-    <li>
-      <strong>Selecionar a placa ESP32:</strong>
-      <ul>
-        <li>Após a instalação, vá novamente para o menu "Tools" (Ferramentas), selecione "Board" (Placa), vá em "esp32_bluepad32" e escolha o modelo específico da sua placa ESP32.</li>
-      </ul>
-    </li>
-  </ol>
-</p>
-<p>
-  Depois de completar esses passos, a Arduino IDE estará configurada para programar a ESP32. Agora você está pronto para começar a desenvolver e carregar códigos para a sua placa ESP32.
-</p>
+## Melhorias Planejadas
 
-<h2>Lista de Materiais</h2>
-<table>
-  <tr>
-    <td>Quantidade</td>
-    <td>Componente</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>ESP32</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>Relé 5V - 4 Canais</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>Relé 5V</td>
-  </tr>
-  <tr>
-    <td>2</td>
-    <td>Motor Vidro Elétrico</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>Bateria 18650</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>Bateria Lipo 11.1V</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>Case para bateria 18650</td>
-  </tr>
-  <tr>
-    <td>3</td>
-    <td>Conetores XT60(macho+fêmea)</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>Controle remoto compatível com o Bluepad</td>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>Barra roscada de 8mm</td>
-  </tr>
-  <tr>
-    <td>2</td>
-    <td>rolamento 628 2rs</td>
-  </tr>
-      <td>2</td>
-      <td>Barra de pinos fêmea</td>
-  </tr>
-  <tr>
-    <td>1kg</td>
-    <td>Filamento para impressão 3D</td>
-  </tr>
-  <tr>
-</table>
+- Controle proporcional dos motores por PWM.
+- Substituição dos relés por uma ponte H.
+- Uso de sensores infravermelhos ou ultrassônicos.
+- Modo totalmente autônomo.
+- Velocidade configurável pelo firmware.
+- Indicadores visuais de conexão e status.
 
-<h2>Diagrama de Ligação</h2>
-<img src="https://github.com/pedro4896/RoboSumo/blob/main/Diagrama_conexao.jpg" height="400px" align="center">
+## Créditos
 
-<h2>Créditos</h2>
-<ul>
-  <li>Ricardo Quesada: https://github.com/ricardoquesada/bluepad32</li>
-  <li>Abraao Lacerda: https://www.youtube.com/watch?v=K_rIaBKQcCk</li>
-</ul>
+- [Hélio Bentzen](https://github.com/heliobentzen) — desenvolvimento e manutenção do projeto.
+- [Ricardo Quesada](https://github.com/ricardoquesada/bluepad32) — biblioteca Bluepad32.
+- [Abraão Lacerda](https://www.youtube.com/watch?v=K_rIaBKQcCk) — referência utilizada no projeto.
+- **GitHub Copilot usando Copilot SDK + Claude Code no VS Code** — melhorias de firmware, segurança, organização do código e documentação.
